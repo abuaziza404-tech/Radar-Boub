@@ -1,0 +1,126 @@
+name: Build BOUH Terrain Radar APK From ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install unzip and sqlite3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip sqlite3
+
+      - name: Find ZIP package in repository root
+        run: |
+          echo "Repository root files:"
+          ls -lah
+
+          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "ZIP_FILE=$ZIP_FILE" >> $GITHUB_ENV
+          echo "Found ZIP: $ZIP_FILE"
+
+      - name: Extract ZIP package
+        run: |
+          rm -rf extracted
+          mkdir extracted
+          unzip -o "$ZIP_FILE" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 5 -type f | sort | head -n 200
+
+      - name: Detect Android project
+        run: |
+          PROJECT_DIR=$(find extracted -name "settings.gradle" -exec dirname {} \; | head -n 1)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "settings.gradle not found inside ZIP."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Android project found at: $PROJECT_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      - name: Verify required Android files
+        run: |
+          cd "$PROJECT_DIR"
+
+          test -f settings.gradle
+          test -f build.gradle
+          test -f app/build.gradle
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
+
+          MAIN_ACTIVITY=$(find app/src/main/java -name "MainActivity.java" | head -n 1)
+
+          if [ -z "$MAIN_ACTIVITY" ]; then
+            echo "MainActivity.java not found."
+            exit 1
+          fi
+
+          echo "MainActivity found at: $MAIN_ACTIVITY"
+
+          DB_FILE=$(find app/src/main/assets/databases -name "*.db" | head -n 1)
+
+          if [ -z "$DB_FILE" ]; then
+            echo "SQLite database not found."
+            exit 1
+          fi
+
+          echo "DB_FILE=$DB_FILE" >> $GITHUB_ENV
+          echo "SQLite database found at: $DB_FILE"
+
+          echo "Required Android project files OK"
+
+      - name: Check SQLite database
+        run: |
+          cd "$PROJECT_DIR"
+          sqlite3 "$DB_FILE" "PRAGMA integrity_check;"
+
+      - name: Check no random logic
+        run: |
+          cd "$PROJECT_DIR"
+
+          if grep -R "Math.random\|new Random\|Random(" -n app/src/main; then
+            echo "Forbidden random logic found."
+            exit 1
+          fi
+
+          echo "No random logic found."
+
+      - name: Build debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-Terrain-Radar-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
