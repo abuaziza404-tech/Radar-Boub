@@ -1,0 +1,199 @@
+name: Build BOUH Terrain Radar V45 APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build APK from V45 ZIP in repository root
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate V45 ZIP package
+        id: locate_zip
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for V45 ZIP package in repository root..."
+
+          ZIP_FILE="$(find . -maxdepth 1 -type f -name 'BOUH_TERRAIN_RADAR_V45_ALPINE_COMMAND_INTERFACE_GITHUB_ROOT_READY.zip' | head -n 1)"
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Exact V45 ZIP name was not found."
+            echo "Searching for any V45 ZIP in repository root..."
+            ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*V45*.zip' | head -n 1)"
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No V45 ZIP file found in repository root."
+            echo "Please upload:"
+            echo "BOUH_TERRAIN_RADAR_V45_ALPINE_COMMAND_INTERFACE_GITHUB_ROOT_READY.zip"
+            echo "to the repository root."
+            exit 1
+          fi
+
+          echo "Found V45 ZIP package: $ZIP_FILE"
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf extracted_app
+          mkdir -p extracted_app
+
+          echo "Unzipping V45 package..."
+          unzip -q "${{ steps.locate_zip.outputs.zip_file }}" -d extracted_app
+
+          echo "Extracted files preview:"
+          find extracted_app -maxdepth 3 -type f | sort | head -n 120
+
+      - name: Locate Android Gradle project
+        id: locate_project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR="$(find extracted_app -type f -name 'settings.gradle' -exec dirname {} \; | head -n 1)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR="$(find extracted_app -type f -name 'settings.gradle.kts' -exec dirname {} \; | head -n 1)"
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Could not find settings.gradle or settings.gradle.kts inside the V45 ZIP package."
+            exit 1
+          fi
+
+          echo "Android project directory: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Validate required project files
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+
+          echo "Validating V45 Android project structure..."
+
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -f build.gradle || test -f build.gradle.kts
+          test -f app/build.gradle || test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
+          test -f app/src/main/java/com/bouh/terrainradar/v41/MainActivity.java
+
+          echo "Required V45 project files are present."
+
+      - name: Print V45 version information
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+
+          echo "Reading app/build.gradle version fields..."
+          grep -n "applicationId\|versionCode\|versionName" app/build.gradle || true
+
+          echo "Reading app name..."
+          if [ -f app/src/main/res/values/strings.xml ]; then
+            cat app/src/main/res/values/strings.xml
+          fi
+
+      - name: Validate SQLite database
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+
+          DB_FILE="app/src/main/assets/databases/BOUH_V30_REAL_3ZONES.db"
+
+          if [ ! -f "$DB_FILE" ]; then
+            echo "Database file not found: $DB_FILE"
+            exit 1
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
+
+          echo "Checking SQLite database integrity..."
+          RESULT="$(sqlite3 "$DB_FILE" 'PRAGMA integrity_check;')"
+
+          echo "SQLite integrity_check result: $RESULT"
+
+          if [ "$RESULT" != "ok" ]; then
+            echo "SQLite database integrity check failed."
+            exit 1
+          fi
+
+          echo "Counting cells..."
+          sqlite3 "$DB_FILE" 'SELECT COUNT(*) AS cells_count FROM cells;'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable if present
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "Gradle wrapper found."
+          else
+            echo "Gradle wrapper not found. System Gradle will be used."
+          fi
+
+      - name: Build V45 Debug APK
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+
+          if [ -f "./gradlew" ]; then
+            ./gradlew clean :app:assembleDebug --stacktrace
+          else
+            gradle clean :app:assembleDebug --stacktrace
+          fi
+
+      - name: Locate generated V45 APK
+        id: locate_apk
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+
+          APK_FILE="$(find app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)"
+
+          if [ -z "$APK_FILE" ]; then
+            echo "No APK file was generated."
+            exit 1
+          fi
+
+          echo "Generated V45 APK: $APK_FILE"
+          echo "apk_file=${{ steps.locate_project.outputs.project_dir }}/$APK_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload V45 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-TERRAIN-RADAR-V45-ALPINE-COMMAND-INTERFACE-debug-apk
+          path: ${{ steps.locate_apk.outputs.apk_file }}
+          if-no-files-found: error
