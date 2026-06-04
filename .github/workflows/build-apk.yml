@@ -1,4 +1,4 @@
-name: Build BOUH Terrain Radar V56 APK
+name: Build BOUH Terrain Radar V57 APK
 
 on:
   workflow_dispatch:
@@ -10,18 +10,18 @@ permissions:
 
 jobs:
   build-apk:
-    name: Build V56 Arabic Satellite Navigation APK
+    name: Build V57 Predictive Radar HD Telescope APK
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Auto extract BOUH V56 package if uploaded as ZIP
+      - name: Auto extract BOUH V57 package if uploaded as ZIP
         shell: bash
         run: |
           set -e
           ZIP_FILE=""
-          for f in BOUH_TERRAIN_RADAR_V56_ARABIC_SATELLITE_NAVIGATION_SMOOTH_GITHUB_ROOT_READY.zip BOUH_TERRAIN_RADAR_V56*.zip BOUH_TERRAIN_RADAR*.zip; do
+          for f in BOUH_TERRAIN_RADAR_V57_PREDICTIVE_RADAR_HD_TELESCOPE_LIGHT_GITHUB_ROOT_READY.zip BOUH_TERRAIN_RADAR_V57*.zip BOUH_TERRAIN_RADAR*.zip; do
             if [ -f "$f" ]; then ZIP_FILE="$f"; break; fi
           done
           if [ -n "$ZIP_FILE" ]; then
@@ -53,5 +53,5 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BOUH_Terrain_Radar_V56_Arabic_Satellite_Navigation_APK
+          name: BOUH_Terrain_Radar_V57_Predictive_Radar_HD_Telescope_APK
           path: app/build/outputs/apk/debug/*.apk
