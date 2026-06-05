@@ -1,0 +1,88 @@
+name: Deploy BOUH Suite ZIP to GitHub Pages
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: read
+
+concurrency:
+  group: bouh-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find uploaded BOUH ZIP
+        id: findzip
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE="$(find . -maxdepth 2 -type f \( -iname 'BOUH_SUITE_PRO_GITHUB_ACTIONS_FULL.zip' -o -iname '*BOUH*SUITE*.zip' -o -iname '*.zip' \) | head -n 1)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No ZIP file found. Upload BOUH_SUITE_PRO_GITHUB_ACTIONS_FULL.zip to the repository root."
+            exit 1
+          fi
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "Found ZIP: $ZIP_FILE"
+
+      - name: Extract BOUH Suite
+        shell: bash
+        run: |
+          set -e
+          rm -rf _site _extract
+          mkdir -p _site _extract
+          unzip -q "${{ steps.findzip.outputs.zip_file }}" -d _extract
+
+          # If ZIP contains one top-level folder, use it. Otherwise use extraction root.
+          FIRST_DIR="$(find _extract -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+          ROOT="_extract"
+
+          if [ -n "$FIRST_DIR" ] && [ -f "$FIRST_DIR/index.html" ]; then
+            ROOT="$FIRST_DIR"
+          elif [ -f "_extract/index.html" ]; then
+            ROOT="_extract"
+          else
+            # Search deeper for the real app root.
+            FOUND_ROOT="$(find _extract -type f -name 'index.html' -print -quit | xargs -r dirname)"
+            if [ -z "$FOUND_ROOT" ]; then
+              echo "Could not find index.html inside ZIP."
+              exit 1
+            fi
+            ROOT="$FOUND_ROOT"
+          fi
+
+          echo "Using app root: $ROOT"
+          cp -R "$ROOT"/. _site/
+
+          test -f _site/index.html
+          test -d _site/apps || echo "Warning: apps/ folder not found"
+          test -d _site/public || echo "Warning: public/ folder not found"
+          test -d _site/shared || echo "Warning: shared/ folder not found"
+
+      - name: Add nojekyll
+        run: |
+          touch _site/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
