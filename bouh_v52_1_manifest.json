@@ -1,0 +1,82 @@
+{
+  "app": "BOUH Terrain Radar V52.1 Final Field Pro",
+  "developer": "Ahmed Abu Aziza Al-Rashidi / أحمد أبوعزيزة الرشيدي",
+  "version": "52.1.0",
+  "merged_from": [
+    "V52 Final Field Command",
+    "V56 Arabic Satellite UI",
+    "V25 Hybrid Esri Pro",
+    "V21 SQLite Center",
+    "V57 Light Telescope"
+  ],
+  "grid_mode": "deterministic_compact_field_grid",
+  "ground_cells": 25027,
+  "truth_status": "integrated_app_grid_from_project_registry_not_raw_pixel_proof",
+  "bbox": {
+    "south": 18.631652,
+    "west": 36.233608,
+    "north": 20.875219,
+    "east": 37.406399
+  },
+  "center": {
+    "lat": 19.73893,
+    "lon": 36.874
+  },
+  "hotspots": [
+    {
+      "id": "A1",
+      "lat": 19.78895,
+      "lon": 36.551106,
+      "type": "GPZ dark regolith analog",
+      "score": 78
+    },
+    {
+      "id": "A2",
+      "lat": 19.834457,
+      "lon": 36.478347,
+      "type": "loader expansion GPZ analog",
+      "score": 80
+    },
+    {
+      "id": "T1",
+      "lat": 19.973186,
+      "lon": 36.74559,
+      "type": "Nugget/Placer + GPZ-Regolith trap",
+      "score": 82
+    },
+    {
+      "id": "T2",
+      "lat": 19.881313,
+      "lon": 36.808758,
+      "type": "Rich surface vein/alteration cluster",
+      "score": 84
+    },
+    {
+      "id": "T3",
+      "lat": 19.983058,
+      "lon": 36.776401,
+      "type": "Structural jog/mountain-feeder core",
+      "score": 79
+    },
+    {
+      "id": "P01",
+      "lat": 20.669096,
+      "lon": 36.428073,
+      "type": "GH/GV alteration-cluster",
+      "score": 70
+    },
+    {
+      "id": "P02",
+      "lat": 20.927345,
+      "lon": 36.49,
+      "type": "GH/GV alteration-cluster",
+      "score": 69
+    }
+  ],
+  "decision_labels": {
+    "85": "TARGET-B FIELD PRIORITY",
+    "70": "GPZ FIELD CHECK",
+    "55": "HOLD",
+    "0": "REJECT/LOW"
+  }
+}

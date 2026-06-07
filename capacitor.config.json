@@ -1,0 +1,11 @@
+{
+  "appId": "com.bouh.terrainradar",
+  "appName": "بوح التضاريس V52.1",
+  "webDir": "dist",
+  "server": { "androidScheme": "https" },
+  "plugins": {
+    "Geolocation": {
+      "permissions": ["location"]
+    }
+  }
+}
