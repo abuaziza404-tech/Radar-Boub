@@ -1,0 +1,248 @@
+name: Build V52 Klemm 237 From ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: "ZIP file name to build"
+        required: false
+        default: "BOUH_TERRAIN_RADAR_V52_KLEMM_237_FINAL_READY.zip"
+  push:
+    branches: [ main, master ]
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-v52-klemm-from-zip.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-v52-klemm:
+    name: Build V52 + Klemm 237 APK/AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+      FINAL_ZIP: BOUH_V52_KLEMM_237_ANDROID_OUTPUTS.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT_ZIP="${{ github.event.inputs.source_zip || 'BOUH_TERRAIN_RADAR_V52_KLEMM_237_FINAL_READY.zip' }}"
+
+          if [ -f "$INPUT_ZIP" ]; then
+            SOURCE_ZIP="$INPUT_ZIP"
+          else
+            SOURCE_ZIP="$(find . -maxdepth 2 -type f -iname '*V52*KLEMM*237*.zip' | head -n 1 || true)"
+          fi
+
+          if [ -z "${SOURCE_ZIP:-}" ]; then
+            SOURCE_ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n 1 || true)"
+          fi
+
+          if [ -z "${SOURCE_ZIP:-}" ]; then
+            echo "No ZIP file found. Upload BOUH_TERRAIN_RADAR_V52_KLEMM_237_FINAL_READY.zip to repository root." >&2
+            exit 1
+          fi
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+          echo "Selected ZIP: $SOURCE_ZIP"
+          unzip -t "$SOURCE_ZIP"
+
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q "$SOURCE_ZIP" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 5 -type f | sort | head -300
+
+      - name: Resolve project root and verify Klemm layer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_ROOT="$(find extracted -type f -path '*/apps/web/package.json' -printf '%h\n' | sort | head -n 1)"
+
+          if [ -z "$PROJECT_ROOT" ]; then
+            PROJECT_ROOT="$(find extracted -type f -name 'package.json' -printf '%h\n' | sort | head -n 1)"
+          fi
+
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "Missing package.json inside ZIP" >&2
+            exit 1
+          fi
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "Resolved PROJECT_ROOT=$PROJECT_ROOT"
+
+          test -f "$PROJECT_ROOT/package.json"
+          test -f "$PROJECT_ROOT/index.html"
+
+          if [ ! -f "$PROJECT_ROOT/public/data/klemm_sites_237.json" ]; then
+            echo "Missing public/data/klemm_sites_237.json" >&2
+            find "$PROJECT_ROOT" -maxdepth 6 -type f | sort | grep -i klemm || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"])
+          p = root / "public/data/klemm_sites_237.json"
+          data = json.loads(p.read_text(encoding="utf-8"))
+
+          if isinstance(data, list):
+              sites = data
+          elif isinstance(data, dict):
+              sites = data.get("sites") or data.get("features") or []
+          else:
+              sites = []
+
+          if len(sites) != 237:
+              raise SystemExit(f"Klemm site count mismatch: {len(sites)}")
+
+          print("Klemm 237 verified:", len(sites))
+          PY
+
+      - name: Setup Node.js 20.20.2
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.20.2"
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf node_modules package-lock.json npm-shrinkwrap.json
+          npm cache verify
+
+          npm install --include=optional --legacy-peer-deps
+
+          npm install --save --include=optional --legacy-peer-deps \
+            @capacitor/core@6.2.1 \
+            @capacitor/cli@6.2.1 \
+            @capacitor/android@6.2.1 \
+            @capacitor/geolocation@6.1.0 \
+            @capacitor/preferences@6.0.3 \
+            @capacitor/filesystem@6.0.3
+
+          npm rebuild rollup || true
+
+          node --version
+          npm --version
+          node -e "try{console.log('vite', require('vite/package.json').version)}catch(e){console.log('vite not found before build')}"
+          node -e "console.log('capacitor', require('@capacitor/cli/package.json').version)"
+
+      - name: Build web assets
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if npm run | grep -q " build"; then
+            npm run build
+          else
+            npx vite build
+          fi
+
+      - name: Add and sync Capacitor Android
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npx cap add android || true
+          npx cap sync android
+
+          test -d android
+          test -f android/gradlew
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_ROOT }}/android
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Build Release AAB
+        working-directory: ${{ env.PROJECT_ROOT }}/android
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon bundleRelease
+
+      - name: Collect outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="BOUH_V52_KLEMM_237_ANDROID_OUTPUTS"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          find "$PROJECT_ROOT/android/app/build/outputs/apk" -type f -name "*.apk" -exec cp {} "$OUT/" \;
+          find "$PROJECT_ROOT/android/app/build/outputs/bundle" -type f -name "*.aab" -exec cp {} "$OUT/" \;
+
+          cp "$PROJECT_ROOT/public/data/klemm_sites_237.json" "$OUT/" || true
+          cp "$PROJECT_ROOT/public/data/klemm_sites_237.csv" "$OUT/" || true
+
+          cp extracted/BUILD_REPORT.md "$OUT/" 2>/dev/null || true
+          cp extracted/RELEASE_NOTES.md "$OUT/" 2>/dev/null || true
+          cp extracted/README_AR.md "$OUT/" 2>/dev/null || true
+          cp extracted/KLEMM_237_INTEGRATION_REPORT.md "$OUT/" 2>/dev/null || true
+
+          APK_COUNT="$(find "$OUT" -type f -name "*.apk" | wc -l | tr -d " ")"
+          AAB_COUNT="$(find "$OUT" -type f -name "*.aab" | wc -l | tr -d " ")"
+
+          echo "APK_COUNT=$APK_COUNT"
+          echo "AAB_COUNT=$AAB_COUNT"
+
+          test "$APK_COUNT" -ge 1
+          test "$AAB_COUNT" -ge 1
+
+          (
+            cd "$OUT"
+            sha256sum * > CHECKSUMS.txt
+          )
+
+          zip -qr "$FINAL_ZIP" "$OUT"
+
+      - name: Upload APK/AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-V52-KLEMM-237-APK-AAB
+          path: BOUH_V52_KLEMM_237_ANDROID_OUTPUTS/*
+          if-no-files-found: error
+
+      - name: Upload final ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH_V52_KLEMM_237_ANDROID_OUTPUTS
+          path: BOUH_V52_KLEMM_237_ANDROID_OUTPUTS.zip
+          if-no-files-found: error
