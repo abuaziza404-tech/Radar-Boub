@@ -1,0 +1,341 @@
+name: BOUH Radar Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: "Optional ZIP filename/path. Leave empty for auto-detect."
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "*.zip"
+      - ".github/workflows/bouh-radar-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-bouh-radar:
+    name: Build BOUH Radar APK/AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      EXPECTED_GROUND_CELLS: "4303"
+      EXPECTED_TRUTH_STATUS: partial_raw_grid_landsat_dem_not_full_spectral
+      FINAL_ARTIFACT_ZIP: BOUH_RADAR_v15_0_ANDROID_ARTIFACTS.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Diagnose repository root
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwd
+          ls -lah
+          echo "ZIP files:"
+          find . -maxdepth 5 -type f -iname "*.zip" -print | sort || true
+
+      - name: Auto-detect BOUH Radar source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT_ZIP="${{ github.event.inputs.source_zip || '' }}"
+
+          if [ -n "$INPUT_ZIP" ]; then
+            test -f "$INPUT_ZIP"
+            SOURCE_ZIP="$INPUT_ZIP"
+          else
+            SOURCE_ZIP=""
+            for preferred in \
+              "./bawh_terrain_local_pro_v15_0_plan1_bouh_radar_standalone.zip" \
+              "./bawh_terrain_local_pro_v14_2_field_grade_operational_suite.zip"
+            do
+              if [ -f "$preferred" ]; then
+                SOURCE_ZIP="$preferred"
+                break
+              fi
+            done
+
+            if [ -z "$SOURCE_ZIP" ]; then
+              while IFS= read -r candidate; do
+                if unzip -l "$candidate" | grep -q "apps/web/public/data/bouh_ground_grid_compact.json"; then
+                  SOURCE_ZIP="$candidate"
+                  break
+                fi
+              done < <(find . -maxdepth 5 -type f -iname "*.zip" ! -path "./.git/*" | sort)
+            fi
+          fi
+
+          if [ -z "$SOURCE_ZIP" ]; then
+            echo "No BOUH Radar source ZIP found." >&2
+            exit 1
+          fi
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+          echo "Selected SOURCE_ZIP=$SOURCE_ZIP"
+          unzip -t "$SOURCE_ZIP"
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q "$SOURCE_ZIP" -d extracted
+
+      - name: Resolve BOUH Radar project root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_ROOT="$(find extracted -type f -path "*/apps/web/package.json" -printf "%h\n" | sort | head -n 1)"
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "Missing apps/web/package.json." >&2
+            find extracted -maxdepth 6 -type f | sort | head -300 >&2
+            exit 1
+          fi
+
+          test -f "$PROJECT_ROOT/public/data/bouh_ground_grid_compact.json"
+          test -d "$PROJECT_ROOT/android"
+          test -f "$PROJECT_ROOT/android/gradlew"
+
+          REPO_ROOT="${PROJECT_ROOT%/apps/web}"
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "REPO_ROOT=$REPO_ROOT" >> "$GITHUB_ENV"
+          echo "PROJECT_ROOT=$PROJECT_ROOT"
+          echo "REPO_ROOT=$REPO_ROOT"
+
+      - name: Verify local ground grid compact data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT_ROOT"])
+          repo = Path(os.environ["REPO_ROOT"])
+
+          compact = project / "public/data/bouh_ground_grid_compact.json"
+          payload = json.loads(compact.read_text(encoding="utf-8"))
+
+          if payload.get("ground_cells") != int(os.environ["EXPECTED_GROUND_CELLS"]):
+              raise SystemExit(f"compact ground_cells mismatch: {payload.get('ground_cells')}")
+
+          if len(payload.get("cells", [])) != int(os.environ["EXPECTED_GROUND_CELLS"]):
+              raise SystemExit(f"compact cells length mismatch: {len(payload.get('cells', []))}")
+
+          if payload.get("truth_status") != os.environ["EXPECTED_TRUTH_STATUS"]:
+              raise SystemExit(f"compact truth_status mismatch: {payload.get('truth_status')}")
+
+          db = repo / "data/precomputed/bouh_ground_grid.sqlite"
+          if not db.exists():
+              raise SystemExit(f"Missing SQLite database: {db}")
+
+          conn = sqlite3.connect(db)
+          try:
+              count = conn.execute("select count(*) from ground_cells").fetchone()[0]
+              truth_rows = conn.execute(
+                  "select truth_status, count(*) from ground_cells group by truth_status order by truth_status"
+              ).fetchall()
+          finally:
+              conn.close()
+
+          expected_count = int(os.environ["EXPECTED_GROUND_CELLS"])
+          expected_truth = os.environ["EXPECTED_TRUTH_STATUS"]
+
+          if count != expected_count:
+              raise SystemExit(f"SQLite ground_cells mismatch: {count}")
+
+          if truth_rows != [(expected_truth, expected_count)]:
+              raise SystemExit(f"SQLite truth_status mismatch: {truth_rows}")
+
+          print(f"compact_cells={payload['ground_cells']}")
+          print(f"sqlite_ground_cells={count}")
+          print(f"truth_status={expected_truth}")
+          print("BOUH Radar local data integrity OK")
+          PY
+
+      - name: Enforce Android assets heavy-file policy before build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSETS="$PROJECT_ROOT/android/app/src/main/assets/public"
+
+          if [ -d "$ASSETS" ]; then
+            FOUND="$(find "$ASSETS" -type f \( \
+              -iname "*.tif" -o \
+              -iname "*.tiff" -o \
+              -iname "*.geotiff" -o \
+              -iname "*.dem" -o \
+              -iname "*.zip" -o \
+              -iname "*.jp2" -o \
+              -iname "*.mbtiles" -o \
+              -iname "*.pmtiles" \
+            \) -print)"
+          else
+            FOUND=""
+          fi
+
+          if [ -n "$FOUND" ]; then
+            echo "Forbidden heavy Android assets found:" >&2
+            echo "$FOUND" >&2
+            exit 1
+          fi
+
+          echo "Android heavy asset policy OK"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install BOUH Radar web dependencies
+        shell: bash
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          set -euo pipefail
+          npm install
+          npm install \
+            @vitejs/plugin-react@latest \
+            vite@latest \
+            typescript@latest \
+            postcss@latest \
+            autoprefixer@latest \
+            @capacitor/core@latest \
+            @capacitor/cli@latest \
+            @capacitor/android@latest \
+            @capacitor/geolocation@latest \
+            @capacitor/preferences@latest \
+            @capacitor/filesystem@latest \
+            vitest@latest
+
+      - name: Build BOUH Radar web
+        shell: bash
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          set -euo pipefail
+          node ./node_modules/vite/bin/vite.js build
+
+      - name: Sync Capacitor Android
+        shell: bash
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          set -euo pipefail
+          node ./node_modules/@capacitor/cli/bin/capacitor sync android
+
+      - name: Re-check compact data in Android assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$PROJECT_ROOT/android/app/src/main/assets/public/data/bouh_ground_grid_compact.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          project = Path(os.environ["PROJECT_ROOT"])
+          payload = json.loads((project / "android/app/src/main/assets/public/data/bouh_ground_grid_compact.json").read_text(encoding="utf-8"))
+          if payload.get("ground_cells") != 4303 or len(payload.get("cells", [])) != 4303:
+              raise SystemExit("Android asset compact data mismatch")
+          print("Android compact data OK: 4303 cells")
+          PY
+
+      - name: Build Debug APK
+        shell: bash
+        working-directory: ${{ env.PROJECT_ROOT }}/android
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Build Release AAB
+        shell: bash
+        working-directory: ${{ env.PROJECT_ROOT }}/android
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon bundleRelease
+
+      - name: Collect APK/AAB and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARTIFACT_DIR="$REPO_ROOT/android-release-artifacts/bouh-radar"
+          rm -rf "$ARTIFACT_DIR"
+          mkdir -p "$ARTIFACT_DIR"
+
+          find "$PROJECT_ROOT/android/app/build/outputs/apk" -type f -name "*.apk" -exec cp {} "$ARTIFACT_DIR/" \;
+          find "$PROJECT_ROOT/android/app/build/outputs/bundle" -type f -name "*.aab" -exec cp {} "$ARTIFACT_DIR/" \;
+
+          APK_COUNT="$(find "$ARTIFACT_DIR" -type f -name "*.apk" | wc -l | tr -d " ")"
+          AAB_COUNT="$(find "$ARTIFACT_DIR" -type f -name "*.aab" | wc -l | tr -d " ")"
+
+          test "$APK_COUNT" -ge 1
+          test "$AAB_COUNT" -ge 1
+
+          (
+            cd "$ARTIFACT_DIR"
+            sha256sum *.apk *.aab | sort
+          ) > "$ARTIFACT_DIR/CHECKSUMS_ANDROID.txt"
+
+          cat "$ARTIFACT_DIR/CHECKSUMS_ANDROID.txt"
+
+      - name: Create final BOUH Radar artifacts ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          (
+            cd "$REPO_ROOT"
+            zip -qr "$GITHUB_WORKSPACE/$FINAL_ARTIFACT_ZIP" \
+              android-release-artifacts/bouh-radar \
+              BUILD_REPORT.md \
+              RELEASE_NOTES.md \
+              PLAN_1_BOUH_RADAR_STANDALONE.md \
+              data/precomputed/bouh_ground_grid.sqlite \
+              apps/web/public/data/bouh_ground_grid_compact.json
+          )
+
+          sha256sum "$GITHUB_WORKSPACE/$FINAL_ARTIFACT_ZIP"
+          unzip -t "$GITHUB_WORKSPACE/$FINAL_ARTIFACT_ZIP"
+
+      - name: Upload BOUH Radar APK/AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-RADAR-v15-0-APK-AAB
+          path: |
+            ${{ env.REPO_ROOT }}/android-release-artifacts/bouh-radar/*.apk
+            ${{ env.REPO_ROOT }}/android-release-artifacts/bouh-radar/*.aab
+            ${{ env.REPO_ROOT }}/android-release-artifacts/bouh-radar/CHECKSUMS_ANDROID.txt
+          if-no-files-found: error
+
+      - name: Upload final BOUH Radar artifacts ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH_RADAR_v15_0_ANDROID_ARTIFACTS
+          path: BOUH_RADAR_v15_0_ANDROID_ARTIFACTS.zip
+          if-no-files-found: error
