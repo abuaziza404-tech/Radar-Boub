@@ -84,8 +84,9 @@ jobs:
             exit 1
           fi
 
-          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
           echo "Resolved PROJECT_ROOT=$PROJECT_ROOT"
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          export PROJECT_ROOT
 
           test -f "$PROJECT_ROOT/package.json"
           test -f "$PROJECT_ROOT/index.html"
