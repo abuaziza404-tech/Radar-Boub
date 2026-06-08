@@ -1,0 +1,122 @@
+name: Build BOUH Terrain Radar V58 Data Precision APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+env:
+  ZIP_NAME: BOUH_TERRAIN_RADAR_V58_DATA_PRECISION_REBUILD_V52_UI_PRESERVED.zip
+
+jobs:
+  build-apk:
+    name: Build V58 Data Precision APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate ZIP package
+        id: locate_zip
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE=""
+          if [ -f "./${ZIP_NAME}" ]; then
+            ZIP_FILE="./${ZIP_NAME}"
+          else
+            ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*V58*DATA*PRECISION*.zip' | head -n 1)"
+          fi
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No V58 ZIP found. Upload ${ZIP_NAME} to repository root."
+            exit 1
+          fi
+          echo "Found ZIP: $ZIP_FILE"
+          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -e
+          rm -rf extracted_app
+          mkdir -p extracted_app
+          unzip -q "${{ steps.locate_zip.outputs.zip_file }}" -d extracted_app
+          find extracted_app -maxdepth 3 -type f | sort | head -n 120
+
+      - name: Locate Gradle project
+        id: locate_project
+        shell: bash
+        run: |
+          set -e
+          PROJECT_DIR="$(find extracted_app -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -exec dirname {} \; | head -n 1)"
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Gradle project not found inside ZIP."
+            exit 1
+          fi
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Validate project and DB
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -f build.gradle || test -f build.gradle.kts
+          test -f app/build.gradle || test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
+          DB_FILE="app/src/main/assets/databases/BOUH_V30_REAL_3ZONES.db"
+          test -f "$DB_FILE"
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
+          RESULT="$(sqlite3 "$DB_FILE" 'PRAGMA integrity_check;')"
+          echo "SQLite integrity_check: $RESULT"
+          if [ "$RESULT" != "ok" ]; then exit 1; fi
+          sqlite3 "$DB_FILE" 'SELECT zone, COUNT(*) FROM cells GROUP BY zone;'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Debug APK
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew clean :app:assembleDebug --stacktrace
+          else
+            gradle clean :app:assembleDebug --stacktrace
+          fi
+
+      - name: Locate APK
+        id: locate_apk
+        shell: bash
+        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+        run: |
+          set -e
+          APK_FILE="$(find app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: APK not generated."
+            exit 1
+          fi
+          echo "apk_file=${{ steps.locate_project.outputs.project_dir }}/$APK_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOUH-TERRAIN-RADAR-V58-DATA-PRECISION-debug-apk
+          path: ${{ steps.locate_apk.outputs.apk_file }}
+          if-no-files-found: error
