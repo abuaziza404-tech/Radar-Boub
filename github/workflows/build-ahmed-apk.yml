@@ -1,0 +1,230 @@
+name: Build Ahmed Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-ahmed-apk.yml'
+      - 'Ahmed_Abuaziza_AI_v0.9_W5_Unified_Source.zip'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ahmed-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      CI: 'true'
+      NODE_ENV: production
+      SOURCE_ZIP: Ahmed_Abuaziza_AI_v0.9_W5_Unified_Source.zip
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Extract application source
+        run: |
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+
+          archive = Path(os.environ['SOURCE_ZIP'])
+          if not archive.is_file():
+              raise SystemExit(
+                  'Upload the source ZIP to the repository root: '
+                  + str(archive)
+              )
+
+          target = Path('source').resolve()
+          if target.exists():
+              raise SystemExit('The source directory already exists.')
+
+          with zipfile.ZipFile(archive) as z:
+              entries = z.infolist()
+              if len(entries) > 1000:
+                  raise SystemExit('Too many files in the source archive.')
+              if sum(i.file_size for i in entries) > 32000000:
+                  raise SystemExit('Source archive exceeds the size limit.')
+
+              for item in entries:
+                  destination = (target / item.filename).resolve()
+                  if not destination.is_relative_to(target):
+                      raise SystemExit('Unsafe archive path.')
+                  if (item.external_attr >> 16) & 0o170000 == 0o120000:
+                      raise SystemExit('Archive symlinks are not allowed.')
+
+              z.extractall(target)
+
+          required = [
+              'android-client/package-lock.json',
+              'android-client/app.json',
+              'android-client/scripts/integrate-assistant.mjs',
+              'native-assistant/assets/app.js'
+          ]
+          for name in required:
+              if not (target / name).is_file():
+                  raise SystemExit('Required file missing: ' + name)
+
+          print('Source extracted and checked.')
+          PY
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: source/android-client/package-lock.json
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "build-tools;35.0.0" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1"
+
+      - name: Install application dependencies
+        working-directory: source/android-client
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Check TypeScript and application tests
+        working-directory: source/android-client
+        run: |
+          npm run check
+          npm test
+
+      - name: Test assistant
+        working-directory: source
+        run: node --test native-assistant/test/app.test.cjs
+
+      - name: Generate and integrate Android project
+        working-directory: source/android-client
+        run: |
+          npx --no-install expo prebuild --platform android --clean --no-install
+          npm run integrate:android
+          chmod +x android/gradlew
+
+      - name: Build APK
+        working-directory: source/android-client/android
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleRelease \
+            --no-daemon \
+            --max-workers=2 \
+            -PreactNativeArchitectures=arm64-v8a \
+            2>&1 | tee ../android-build.log
+
+      - name: Verify APK signature and version
+        run: |
+          python3 - <<'PY'
+          import os, re, json, hashlib, shutil, subprocess
+          from pathlib import Path
+
+          mobile = Path('source/android-client')
+          config = json.loads(
+              (mobile / 'app.json').read_text()
+          )['expo']
+
+          sdk = (
+              os.environ.get('ANDROID_SDK_ROOT')
+              or os.environ.get('ANDROID_HOME')
+          )
+          if not sdk:
+              raise SystemExit('Android SDK path missing.')
+
+          tools = Path(sdk) / 'build-tools/36.0.0'
+          apk = mobile / 'android/app/build/outputs/apk/release/app-release.apk'
+
+          def run(tool, *args):
+              return subprocess.check_output(
+                  [str(tools / tool), *map(str, args)],
+                  text=True
+              )
+
+          certs = run(
+              'apksigner', 'verify',
+              '--verbose', '--print-certs', apk
+          )
+          signers = re.findall(
+              r'Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]+)',
+              certs
+          )
+
+          expected = 'fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c'
+          if len(signers) != 1 or signers[0].lower() != expected:
+              raise SystemExit(
+                  'Signing certificate differs from the original app. '
+                  'Do not uninstall the installed app.'
+              )
+
+          badging = run('aapt', 'dump', 'badging', apk)
+          identity = re.search(
+              r"package: name='([^']+)' versionCode='(\d+)' versionName='([^']+)'",
+              badging
+          )
+          wanted = (
+              'com.ahmedabuaziza.executive',
+              str(config['android']['versionCode']),
+              config['version']
+          )
+
+          if not identity or identity.groups() != wanted:
+              raise SystemExit('APK identity or version mismatch.')
+
+          if "native-code: 'arm64-v8a'" not in badging:
+              raise SystemExit('APK is missing arm64-v8a libraries.')
+
+          output = Path('release')
+          output.mkdir(exist_ok=True)
+          name = f"Ahmed_Abuaziza_AI_v{config['version']}_arm64.apk"
+          shutil.copyfile(apk, output / name)
+
+          report = {
+              'file': name,
+              'package': wanted[0],
+              'versionCode': wanted[1],
+              'version': wanted[2],
+              'certificateSha256': expected,
+              'sha256': hashlib.sha256(apk.read_bytes()).hexdigest(),
+              'phoneLoginAndInferenceTested': False
+          }
+          (output / 'verification.json').write_text(
+              json.dumps(report, indent=2) + '\n'
+          )
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Download verified APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: Ahmed-Abuaziza-Android-APK
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Android-Build-Log
+          path: source/android-client/android-build.log
+          if-no-files-found: ignore
+          retention-days: 7
